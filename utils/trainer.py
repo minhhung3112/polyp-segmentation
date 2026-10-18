@@ -70,13 +70,20 @@ class Trainer:
         self.checkpointer = checkpointer
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.model.to(self.device)
+        self.use_amp = self.device.type == 'cuda' and getattr(cfg, 'amp', True)
+        self.scaler = torch.cuda.amp.GradScaler(enabled=self.use_amp)
 
     def train_one_epoch(self, train_loader, epoch: int) -> dict:
         self.model.train()
         adjust_lr(self.optimizer, self.cfg.lr, epoch, self.cfg.decay_rate, self.cfg.decay_epoch)
         current_lr = self.optimizer.param_groups[0]['lr']
 
-        size_rates = [0.75, 1.0, 1.25]
+        # Multi-scale training (PraNet standard: [0.75, 1.0, 1.25]) or Fast single-scale [1.0]
+        if getattr(self.cfg, 'fast', False) or getattr(self.cfg, 'no_multiscale', False):
+            size_rates = [1.0]
+        else:
+            size_rates = [0.75, 1.0, 1.25]
+
         loss_record = AvgMeter()
         loss_record2 = AvgMeter()
         loss_record3 = AvgMeter()
@@ -101,23 +108,31 @@ class Trainer:
                     scaled_images = images
                     scaled_gts = gts
 
-                outputs = self.model(scaled_images)
+                with torch.cuda.amp.autocast(enabled=self.use_amp):
+                    outputs = self.model(scaled_images)
 
-                if isinstance(outputs, (tuple, list)) and len(outputs) == 4:
-                    lat5, lat4, lat3, lat2 = outputs
-                    l5 = self.loss_fn(lat5, scaled_gts)
-                    l4 = self.loss_fn(lat4, scaled_gts)
-                    l3 = self.loss_fn(lat3, scaled_gts)
-                    l2 = self.loss_fn(lat2, scaled_gts)
-                    loss = l2 + l3 + l4 + l5
-                elif isinstance(outputs, (tuple, list)):
-                    loss = sum(self.loss_fn(out, scaled_gts) for out in outputs)
+                    if isinstance(outputs, (tuple, list)) and len(outputs) == 4:
+                        lat5, lat4, lat3, lat2 = outputs
+                        l5 = self.loss_fn(lat5, scaled_gts)
+                        l4 = self.loss_fn(lat4, scaled_gts)
+                        l3 = self.loss_fn(lat3, scaled_gts)
+                        l2 = self.loss_fn(lat2, scaled_gts)
+                        loss = l2 + l3 + l4 + l5
+                    elif isinstance(outputs, (tuple, list)):
+                        loss = sum(self.loss_fn(out, scaled_gts) for out in outputs)
+                    else:
+                        loss = self.loss_fn(outputs, scaled_gts)
+
+                if self.use_amp:
+                    self.scaler.scale(loss).backward()
+                    self.scaler.unscale_(self.optimizer)
+                    clip_gradient(self.optimizer, self.cfg.clip)
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
                 else:
-                    loss = self.loss_fn(outputs, scaled_gts)
-
-                loss.backward()
-                clip_gradient(self.optimizer, self.cfg.clip)
-                self.optimizer.step()
+                    loss.backward()
+                    clip_gradient(self.optimizer, self.cfg.clip)
+                    self.optimizer.step()
 
                 if rate == 1.0:
                     bs = images.size(0)

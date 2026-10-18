@@ -96,6 +96,8 @@ def get_loader(
         shuffle=shuffle,
         num_workers=num_workers,
         pin_memory=pin_memory,
+        persistent_workers=(num_workers > 0),
+        prefetch_factor=2 if num_workers > 0 else None,
         drop_last=is_train
     )
     return data_loader

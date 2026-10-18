@@ -57,8 +57,8 @@ def set_seed(seed: int = 42):
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
+        torch.backends.cudnn.deterministic = False
+        torch.backends.cudnn.benchmark = True
 
 
 def parse_seeds(args) -> list[int]:
@@ -215,6 +215,10 @@ def main():
                         help='Seed or list of seeds (e.g. --seeds 42 or --seeds 42 3407 1234 or --seeds 42,3407)')
     parser.add_argument('--multiseed', action='store_true', default=False,
                         help='Enable multi-seed training mode')
+    parser.add_argument('--fast', action='store_true', default=False,
+                        help='Fast mode: train at single scale 352x352 (speeds up training 3x to 5x)')
+    parser.add_argument('--no_amp', action='store_true', default=False,
+                        help='Disable Automatic Mixed Precision (AMP)')
     parser.add_argument('--batchsize', type=int, default=8,
                         help='Batch size (default: 8 to prevent CUDA OOM on Colab T4)')
     parser.add_argument('--epochs', type=int, default=100, help='Total training epochs')
@@ -222,6 +226,7 @@ def main():
     parser.add_argument('--resume', type=str, default=None,
                         help='Path to checkpoint (.pth) to resume training from.')
     args = parser.parse_args()
+    args.amp = not args.no_amp
 
     # Enforce Fixed PraNet Hyperparameters
     args.lr = 1e-4
