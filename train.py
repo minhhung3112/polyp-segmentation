@@ -25,9 +25,16 @@ Hyperparameter settings reproducing each paper exactly:
 import argparse
 import os
 import sys
+import warnings
 import random
 import numpy as np
 import torch
+
+# Suppress deprecation and future warnings (e.g. from timm)
+warnings.filterwarnings("ignore")
+
+# Avoid CUDA memory fragmentation on GPUs
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 # Ensure the repository root is in sys.path regardless of execution CWD
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
