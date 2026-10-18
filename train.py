@@ -2,8 +2,13 @@
 End-to-End Training Entry Point for Polyp Segmentation.
 
 Usage:
+    # Single seed:
+    python train.py --model pid_unet --loss structure_loss --seed 42
     python train.py --model pranet --loss structure_loss --seed 42
-    python train.py --model polyp_pvt --loss structure_loss --seed 42
+
+    # Multi-seed or seeds list:
+    python train.py --model pid_unet --seeds 42 --multiseed
+    python train.py --model pid_unet --seeds 42 3407 1234 --multiseed
 
 Hyperparameter settings reproducing each paper exactly:
     Epochs: 100  (PraNet paper: 20; Polyp-PVT Table II: 100; we default 100)
@@ -49,46 +54,51 @@ def set_seed(seed: int = 42):
         torch.backends.cudnn.benchmark = False
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Train Polyp Segmentation Network")
-    parser.add_argument('--model', type=str, default='pranet', help=f'Model name. Available: {list_models()}')
-    parser.add_argument('--loss', type=str, default='structure_loss', help=f'Loss name. Available: {list_losses()}')
-    parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility')
-    parser.add_argument('--epochs', type=int, default=100, help='Total training epochs')
-    parser.add_argument('--data_root', type=str, default='./data', help='Dataset root path')
-    parser.add_argument('--resume', type=str, default=None,
-                        help='Path to checkpoint (.pth) to resume training from. '
-                             'Restores model weights, optimizer state, and starting epoch.')
-    args = parser.parse_args()
+def parse_seeds(args) -> list[int]:
+    """Parse single or multiple seeds from --seed, --seeds, or --multiseed."""
+    if args.seeds is not None:
+        raw = args.seeds
+        if isinstance(raw, (int, str)):
+            raw = [raw]
+        seeds = []
+        for item in raw:
+            if isinstance(item, str):
+                for part in item.replace(',', ' ').split():
+                    if part.strip().isdigit():
+                        seeds.append(int(part.strip()))
+            elif isinstance(item, int):
+                seeds.append(item)
+        return seeds if seeds else [args.seed]
+    elif args.multiseed:
+        return [42, 3407, 1234]
+    else:
+        return [args.seed]
 
-    # 1. Enforce Fixed PraNet Hyperparameters
-    args.lr = 1e-4
-    args.batchsize = 16
-    args.trainsize = 352
-    args.clip = 0.5
-    args.decay_rate = 0.1
-    args.decay_epoch = 50
 
-    # 2. Reproducibility
-    set_seed(args.seed)
+def train_single_run(args, seed: int, run_name: str = None) -> dict:
+    """Train a model for a specific seed."""
+    set_seed(seed)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"============================================================")
+    model_name = args.model
+    tag = run_name if run_name else model_name
+
+    print(f"\n============================================================")
     print(f"POLYP SEGMENTATION TRAINING PIPELINE")
     print(f"============================================================")
-    print(f"Model: {args.model} | Loss: {args.loss} | Seed: {args.seed} | Device: {device}")
+    print(f"Model: {args.model} | Loss: {args.loss} | Seed: {seed} | Device: {device}")
     print(f"Resolution: {args.trainsize}x{args.trainsize} (Multi-scale: 0.75, 1.0, 1.25)")
     print(f"LR: {args.lr} | Epochs: {args.epochs} | Batch: {args.batchsize}")
+    print(f"Output Tag: {tag}")
     print(f"============================================================")
 
-
-    # 3. Setup Dataset
+    # 1. Setup Dataset
     data_root = setup_dataset(args.data_root)
     train_img_dir = os.path.join(data_root, 'TrainDataset', 'images')
     train_gt_dir = os.path.join(data_root, 'TrainDataset', 'masks')
     val_img_dir = os.path.join(data_root, 'TestDataset', 'CVC-ClinicDB', 'images')
     val_gt_dir = os.path.join(data_root, 'TestDataset', 'CVC-ClinicDB', 'masks')
 
-    # 4. Data Loaders
+    # 2. Data Loaders
     num_workers = min(4, os.cpu_count() or 1)
     train_loader = get_loader(
         train_img_dir, train_gt_dir,
@@ -108,30 +118,27 @@ def main():
     )
     print(f"[Data] Training pairs: {len(train_loader.dataset)} | Validation pairs: {len(val_loader.dataset)}")
 
-    # 5. Build Model & Loss
+    # 3. Build Model & Loss
     print(f"[Init] Initializing model '{args.model}'...")
     model = get_model(args.model)
     loss_fn = get_loss(args.loss)
 
-    # Per-paper optimizer dispatch:
-    #   Polyp-PVT Table II: AdamW, weight_decay=1e-4
-    #   PraNet / SANet / HarDNet-MSEG / UNet variants: Adam (no weight decay)
+    # Per-paper optimizer dispatch
     _ADAMW_MODELS = {'polyp_pvt'}
     if args.model.lower() in _ADAMW_MODELS:
         optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
-        opt_name = f"AdamW (weight_decay=1e-4)"
+        opt_name = "AdamW (weight_decay=1e-4)"
     else:
         optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
         opt_name = "Adam"
 
-
-    # 6. Logger, Checkpointer, and Evaluator
-    logger = Logger(log_dir='./logs', model_name=args.model)
-    checkpointer = Checkpointer(save_dir='./snapshots', model_name=args.model)
+    # 4. Logger, Checkpointer, and Evaluator
+    logger = Logger(log_dir='./logs', model_name=tag)
+    checkpointer = Checkpointer(save_dir='./snapshots', model_name=tag)
     val_evaluator = Evaluator(data_root=data_root, model=model, device=device, testsize=args.trainsize)
     trainer = Trainer(model, optimizer, loss_fn, args, logger, checkpointer)
 
-    # 7. Resume from checkpoint (optional)
+    # 5. Resume from checkpoint (optional)
     start_epoch = 1
     if args.resume:
         if not os.path.exists(args.resume):
@@ -146,12 +153,11 @@ def main():
                   f"(best mDice so far: {checkpointer.best_dice:.4f}). "
                   f"Continuing from epoch {start_epoch}.")
 
-    # 8. Training Loop
+    # 6. Training Loop
     print(f"[Init] Optimizer: {opt_name} | lr={args.lr}")
     print(f"\n[Train] Starting training from epoch {start_epoch} to {args.epochs}...")
 
     for epoch in range(start_epoch, args.epochs + 1):
-
         train_stats = trainer.train_one_epoch(train_loader, epoch)
         val_metrics = trainer.validate(val_loader, val_evaluator)
         logger.log(epoch, train_stats, val_metrics)
@@ -159,11 +165,12 @@ def main():
 
     logger.close()
 
-    # 8. Final Cross-Dataset Evaluation on Best Checkpoint
+    # 7. Final Cross-Dataset Evaluation on Best Checkpoint
     best_weights = checkpointer.get_best_path()
+    all_results = None
     if os.path.exists(best_weights):
         print(f"\n============================================================")
-        print(f"RUNNING FINAL BENCHMARK & EDGE AI EVALUATION ON BEST MODEL: {best_weights}")
+        print(f"RUNNING FINAL BENCHMARK ON BEST MODEL: {best_weights}")
         print(f"============================================================")
         Checkpointer.load(model, best_weights, device=device)
         evaluator = Evaluator(
@@ -174,21 +181,65 @@ def main():
             model_name=args.model,
             weights_path=best_weights
         )
-        results_dir = os.path.join('./results', args.model)
+        results_dir = os.path.join('./results', tag)
 
-        # 1. Edge AI Deployment Profiling (Params, FLOPs, Latency, FPS, Peak Memory)
+        # Edge AI Hardware efficiency
         print(f"\n[Evaluation] Profiling Edge AI & Hardware efficiency...")
         efficiency = evaluator.benchmark_efficiency(measure_cpu=True)
 
-        # 2. Benchmark accuracy across all 5 test sets
+        # Benchmark accuracy across all 5 test sets
         results = evaluator.evaluate_all(save_results_dir=results_dir)
 
-        # 3. Print & save both Accuracy and Hardware metrics
-        evaluator.print_table(results, efficiency=efficiency, model_name=args.model)
+        # Save metrics
+        evaluator.print_table(results, efficiency=efficiency, model_name=tag)
         evaluator.save_csv(results, path=os.path.join(results_dir, 'metrics.csv'), efficiency=efficiency)
         evaluator.save_latex(results, path=os.path.join(results_dir, 'metrics.tex'), efficiency=efficiency)
+        all_results = results
 
-    print("\n[Done] Training and benchmark evaluation complete.")
+    return all_results
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Train Polyp Segmentation Network")
+    parser.add_argument('--model', type=str, default='pranet', help=f'Model name. Available: {list_models()}')
+    parser.add_argument('--loss', type=str, default='structure_loss', help=f'Loss name. Available: {list_losses()}')
+    parser.add_argument('--seed', type=int, default=42, help='Random seed for single run (default: 42)')
+    parser.add_argument('--seeds', nargs='*', type=str, default=None,
+                        help='Seed or list of seeds (e.g. --seeds 42 or --seeds 42 3407 1234 or --seeds 42,3407)')
+    parser.add_argument('--multiseed', action='store_true', default=False,
+                        help='Enable multi-seed training mode')
+    parser.add_argument('--epochs', type=int, default=100, help='Total training epochs')
+    parser.add_argument('--data_root', type=str, default='./data', help='Dataset root path')
+    parser.add_argument('--resume', type=str, default=None,
+                        help='Path to checkpoint (.pth) to resume training from.')
+    args = parser.parse_args()
+
+    # Enforce Fixed PraNet Hyperparameters
+    args.lr = 1e-4
+    args.batchsize = 16
+    args.trainsize = 352
+    args.clip = 0.5
+    args.decay_rate = 0.1
+    args.decay_epoch = 50
+
+    seeds = parse_seeds(args)
+
+    if len(seeds) == 1:
+        # Standard Single Seed Run
+        seed = seeds[0]
+        args.seed = seed
+        train_single_run(args, seed, run_name=args.model)
+    else:
+        # Multi-seed Benchmark Run
+        print(f"\n============================================================")
+        print(f"MULTI-SEED BENCHMARK MODE: {len(seeds)} SEEDS {seeds}")
+        print(f"============================================================")
+        for idx, seed in enumerate(seeds, 1):
+            print(f"\n>>> [Multi-Seed {idx}/{len(seeds)}] Starting Run for Seed: {seed} <<<")
+            args.seed = seed
+            run_name = f"{args.model}_seed{seed}"
+            train_single_run(args, seed, run_name=run_name)
+        print(f"\n[Done] Multi-seed evaluation completed for all seeds: {seeds}.")
 
 
 if __name__ == '__main__':
