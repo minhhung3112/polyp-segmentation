@@ -1,0 +1,14 @@
+torch
+torchvision
+numpy
+Pillow
+matplotlib
+tqdm
+huggingface_hub
+timm
+einops
+thop
+scipy
+pandas
+opencv-python
+tabulate

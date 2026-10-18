@@ -1,0 +1,34 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# PyTorch checkpoints
+*.pth
+*.pt
+snapshots/*
+!snapshots/.gitkeep
+
+# Dataset (Do NOT commit large data to git)
+data/
+dataset/
+*.zip
+dataset.zip
+
+# Results and logs
+results/*
+!results/.gitkeep
+visualizations/*
+!visualizations/.gitkeep
+logs/*
+!logs/.gitkeep
+
+# Reference cloned repos
+ref_repos/
+Ref/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
