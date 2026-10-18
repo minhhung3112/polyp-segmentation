@@ -208,6 +208,8 @@ def main():
                         help='Seed or list of seeds (e.g. --seeds 42 or --seeds 42 3407 1234 or --seeds 42,3407)')
     parser.add_argument('--multiseed', action='store_true', default=False,
                         help='Enable multi-seed training mode')
+    parser.add_argument('--batchsize', type=int, default=8,
+                        help='Batch size (default: 8 to prevent CUDA OOM on Colab T4)')
     parser.add_argument('--epochs', type=int, default=100, help='Total training epochs')
     parser.add_argument('--data_root', type=str, default='./data', help='Dataset root path')
     parser.add_argument('--resume', type=str, default=None,
@@ -216,7 +218,6 @@ def main():
 
     # Enforce Fixed PraNet Hyperparameters
     args.lr = 1e-4
-    args.batchsize = 16
     args.trainsize = 352
     args.clip = 0.5
     args.decay_rate = 0.1
