@@ -251,172 +251,20 @@ def _cmunext_large(img_ch: int = 3, output_ch: int = 1, **kwargs):
     )
 
 
-# ============================================================================
-# IMPROVEMENT (2026): TRAINING-ONLY HIGHLIGHT-AWARE TARGET REGULARIZATION (HAT)
-# ============================================================================
-# Based on:
-# Li & Masood (2026), "HAT-SAM3: Endoscopy-Aware Adaptation of a Foundation
-# Segmentation Model for Generalizable Polyp Segmentation", The Visual Computer.
-# https://doi.org/10.1007/s00371-026-04562-3
-#
-# The complete CMUNeXt network above is left UNCHANGED. This addition has
-# zero learnable parameters and is not executed during validation/inference.
-# Using the supplied model file by itself as models/cmunext.py does NOT enable
-# HAT. Use this file as a TRAINING ENTRY POINT from the repository root:
-#     python cmunext_hat.py --check-only
-#     python cmunext_hat.py --train --seed 42 --epochs 100 --batchsize 8
-# ============================================================================
-
-
-def highlight_aware_target(image, mask, rng, probability=0.5):
-    """Return a temporary HAT training mask from a paired RGB image and GT.
-
-    The original HAT paper uses V > 0.90, saturation < 0.25, p=0.5, and a
-    10-pixel dilation radius at 1008x1008. Since the CMUNeXt pipeline resizes
-    input to 352x352, we scale that radius at the *pre-resize* image size.
-
-    The image and the input mask objects are NOT mutated. Only specular pixels
-    in a thin exterior band around an annotated foreground are added.
-
-    Args:
-        image: PIL RGB image, after spatial flips/rotations but before jitter.
-        mask: PIL L image, spatially aligned with image.
-        rng: Dedicated random.Random instance; does not perturb baseline RNG.
-        probability: Chance to apply the regularizer to an individual image.
-
-    Returns:
-        PIL L mask. No inference-time transformations are introduced.
-    """
-    if not 0.0 <= probability <= 1.0:
-        raise ValueError('HAT probability must be within [0, 1].')
-    if probability == 0.0 or rng.random() >= probability:
-        return mask
-
-    import numpy as np
-    from PIL import Image, ImageFilter
-
-    rgb = np.asarray(image.convert('RGB'), dtype=np.float32) / 255.0
-    value = rgb.max(axis=2)
-    saturation = (value - rgb.min(axis=2)) / (value + 1e-6)
-    bright_specular = (value > 0.90) & (saturation < 0.25)
-
-    original = mask.convert('L')
-    mask_array = np.asarray(original)
-    foreground = mask_array > 127
-    if not bright_specular.any() or not foreground.any():
-        return mask
-
-    height, width = mask_array.shape
-    radius = max(1, round(10 * min(height, width) / 1008))
-    dilated = np.asarray(
-        original.filter(ImageFilter.MaxFilter(2 * radius + 1))
-    ) > 127
-    exterior_band = dilated & ~foreground
-    target_pixels = bright_specular & exterior_band
-
-    modified = mask_array.copy()
-    modified[target_pixels] = 255
-    return Image.fromarray(modified, mode='L')
-
-
-def enable_highlight_aware_training(probability=0.5):
-    """Install HAT into the repo's *training* augmentation, not the model.
-
-    Called before train_single_run() builds loaders. The standard loader uses
-    PolypAugmentation only for is_train=True, so validation/test are unchanged.
-    Google Colab/Linux data workers use fork, preserving this substitution.
-    """
-    import random
-    from utils import dataloader
-    from utils.augmentation import PolypAugmentation
-
-    class HATPolypAugmentation(PolypAugmentation):
-        def __init__(self):
-            super().__init__()  # Preserve original flip/rotation configuration.
-            self._hat_random = None
-
-        def __call__(self, image, mask):
-            # Preserve original paired spatial augmentation unchanged.
-            image, mask = super().__call__(image, mask)
-            if self._hat_random is None:
-                # Own RNG stream, seeded per DataLoader worker; baseline
-                # flip/rotate calls still consume their original RNG stream.
-                self._hat_random = random.Random(torch.initial_seed() ^ 0x4841542026)
-            return image, highlight_aware_target(
-                image, mask, rng=self._hat_random, probability=probability
-            )
-
-    dataloader.PolypAugmentation = HATPolypAugmentation
-    return HATPolypAugmentation
-
-
-def _verify_base_architecture():
-    """Check every state-dict key/shape against the repo's original CMUNeXt.
-
-    This is stronger than merely comparing two rounded parameter counts.
-    """
-    from models.cmunext import CMUNeXt as RepositoryCMUNeXt
-
-    baseline = RepositoryCMUNeXt()
-    proposed = _cmunext_base()
-    before = {name: tuple(t.shape) for name, t in baseline.state_dict().items()}
-    after = {name: tuple(t.shape) for name, t in proposed.state_dict().items()}
-    if before != after:
-        raise AssertionError('CMUNeXt state_dict keys/shapes differ from baseline!')
-    n_before = sum(p.numel() for p in baseline.parameters())
-    n_after = sum(p.numel() for p in proposed.parameters())
-    if n_before != n_after:
-        raise AssertionError('CMUNeXt parameter count changed!')
-
-    # Importing models.cmunext may replace the registry entry. Restore the
-    # uploaded architecture's model factory for this training process.
-    register_model('cmunext')(_cmunext_base)
-    print(f'[Architecture verified] Original: {n_before:,} parameters')
-    print(f'[Architecture verified] Proposed: {n_after:,} parameters')
-    print(f'[Architecture verified] Matched state_dict entries: {len(before)}')
-    return n_after
-
-
-def _main():
-    import argparse
-    from argparse import Namespace
-    from pathlib import Path
-
-    parser = argparse.ArgumentParser(
-        description='CMUNeXt Base + training-only HAT (same architecture/params)'
+@register_model('cmunext_s')
+def _cmunext_small(img_ch: int = 3, output_ch: int = 1, **kwargs):
+    """CMUNeXt-S (small) variant: dims=[8,16,32,64,128], depths=[1,1,1,1,1], kernels=[3,3,7,7,9]."""
+    return CMUNeXt(
+        input_channel=img_ch, num_classes=output_ch,
+        dims=[8, 16, 32, 64, 128], depths=[1, 1, 1, 1, 1], kernels=[3, 3, 7, 7, 9],
     )
-    parser.add_argument('--train', action='store_true', help='Actually run training')
-    parser.add_argument('--check-only', action='store_true', help='Only verify model')
-    parser.add_argument('--seed', type=int, default=42)
-    parser.add_argument('--epochs', type=int, default=100)
-    parser.add_argument('--batchsize', type=int, default=8)
-    parser.add_argument('--data_root', type=str, default='./data')
-    args = parser.parse_args()
 
-    if not Path('train.py').is_file() or not Path('utils/dataloader.py').is_file():
-        parser.error('Run from the polyp-segmentation repository root, next to train.py')
-    if args.train and args.check_only:
-        parser.error('Choose --train OR --check-only, not both.')
 
-    _verify_base_architecture()
-    if not args.train:
-        print('For the 100-epoch HAT experiment: python cmunext_hat.py --train')
-        return
-
-    # The original train.py routine remains the sole training/evaluation code.
-    # Only the dataset augmentation class is changed (train set only).
-    enable_highlight_aware_training(probability=0.5)
-    from train import train_single_run
-
-    cfg = Namespace(
-        model='cmunext', loss='structure_loss', seed=args.seed,
-        epochs=args.epochs, batchsize=args.batchsize, data_root=args.data_root,
-        resume=None, fast=False, amp=True, lr=1e-4, trainsize=352,
-        clip=0.5, decay_rate=0.1, decay_epoch=50,
+@register_model('cmunext_l')
+def _cmunext_large(img_ch: int = 3, output_ch: int = 1, **kwargs):
+    """CMUNeXt-L (large) variant: dims=[32,64,128,256,512], depths=[1,1,1,6,3], kernels=[3,3,7,7,7]."""
+    return CMUNeXt(
+        input_channel=img_ch, num_classes=output_ch,
+        dims=[32, 64, 128, 256, 512], depths=[1, 1, 1, 6, 3], kernels=[3, 3, 7, 7, 7],
     )
-    train_single_run(cfg, args.seed, run_name=f'cmunext_hat_seed{args.seed}')
-
-
-if __name__ == '__main__':
-    _main()
 
